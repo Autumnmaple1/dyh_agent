@@ -1,0 +1,20 @@
+{
+  "name": "grand-canal-agent-web",
+  "private": true,
+  "version": "0.2.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@phosphor-icons/react": "2.1.10",
+    "@vitejs/plugin-react": "4.7.0",
+    "leaflet": "^1.9.4",
+    "react": "19.2.1",
+    "react-dom": "19.2.1",
+    "react-leaflet": "^5.0.0",
+    "vite": "7.2.4"
+  }
+}

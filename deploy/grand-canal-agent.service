@@ -1,0 +1,16 @@
+[Unit]
+Description=Grand Canal Agent FastAPI Backend
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/grand-canal-agent
+ExecStart=/opt/grand-canal-agent/.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8010
+Restart=always
+RestartSec=3
+User=www-data
+Group=www-data
+EnvironmentFile=/opt/grand-canal-agent/.env
+
+[Install]
+WantedBy=multi-user.target

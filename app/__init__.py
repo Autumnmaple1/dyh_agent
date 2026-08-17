@@ -1,0 +1,2 @@
+"""Grand Canal agent application."""
+
