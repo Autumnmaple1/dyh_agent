@@ -28,13 +28,53 @@ _DEFAULT_SUGGESTIONS: dict[ChatMode, list[str]] = {
 }
 
 _COMPLETION_INSTRUCTION = (
-    "\n\n请以严格 JSON 对象输出，不要输出任何其它内容、不要使用代码块。格式如下：\n"
+    "\n\n请以严格 JSON 对象输出，不要输出任何其它内容、不要使用代码块、不要换行。格式如下：\n"
     '{"answer": "你对用户的最新回复", "suggestions": ["用户可能的下一条消息1", "用户可能的下一条消息2", "用户可能的下一条消息3"]}\n'
     "要求：\n"
     "1. answer 与 suggestions 均基于当前对话内容，紧扣你刚刚的回复。\n"
     "2. suggestions 恰好 3 条，必须站在用户/游客的视角，是可被用户直接选中发送的下一条提问或行动，不要写成你（角色）要说的话。\n"
-    "3. 不得重复用户刚问过或已经问过的内容。"
+    "3. 不得重复用户刚问过或已经问过的内容。\n"
+    "4. 整个 JSON 必须输出为一行；answer 内部需要分段时，用 \\n 表示，不要使用真实换行符。"
 )
+
+_RETRY_INSTRUCTION = (
+    "\n\n你刚才的输出不是合法 JSON。请只重新输出一个 JSON 对象：\n"
+    "1. 不要任何解释、不要代码块、不要 Markdown。\n"
+    "2. 整个 JSON 必须是一行，字符串内不要有真实换行，需要换行时写成 \\n。\n"
+    '3. 格式仍为 {"answer": "你的回复", "suggestions": ["建议1", "建议2", "建议3"]}。'
+)
+
+_FALLBACK_ANSWER = "抱歉，我这边回复生成出了点小问题，请再问一次。"
+
+
+def _repair_json_string_newlines(text: str) -> str:
+    """把 JSON 字符串内部的真实换行替换为 \\n，修复常见的多行输出。"""
+    out: list[str] = []
+    in_string = False
+    escaped = False
+    for ch in text:
+        if in_string:
+            if escaped:
+                out.append(ch)
+                escaped = False
+                continue
+            if ch == "\\":
+                out.append(ch)
+                escaped = True
+                continue
+            if ch == '"':
+                in_string = False
+                out.append(ch)
+                continue
+            if ch in "\r\n":
+                out.append("\\n")
+                continue
+            out.append(ch)
+            continue
+        if ch == '"':
+            in_string = True
+        out.append(ch)
+    return "".join(out)
 
 
 def _extract_json(text: str) -> dict | None:
@@ -42,19 +82,23 @@ def _extract_json(text: str) -> dict | None:
     cleaned = text.strip()
     cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
     cleaned = re.sub(r"\s*```$", "", cleaned)
-    try:
-        data = json.loads(cleaned)
-        return data if isinstance(data, dict) else None
-    except json.JSONDecodeError:
-        pass
+
+    for candidate in (cleaned, _repair_json_string_newlines(cleaned)):
+        try:
+            data = json.loads(candidate)
+            return data if isinstance(data, dict) else None
+        except json.JSONDecodeError:
+            pass
+
     match = re.search(r"\{.*\}", cleaned, re.DOTALL)
-    if not match:
-        return None
-    try:
-        data = json.loads(match.group(0))
-        return data if isinstance(data, dict) else None
-    except json.JSONDecodeError:
-        return None
+    if match:
+        for candidate in (match.group(0), _repair_json_string_newlines(match.group(0))):
+            try:
+                data = json.loads(candidate)
+                return data if isinstance(data, dict) else None
+            except json.JSONDecodeError:
+                pass
+    return None
 
 
 def _normalize_suggestions(data: dict | None, mode: ChatMode) -> list[str]:
@@ -100,21 +144,43 @@ class OpenAICompatibleProvider(LLMProvider):
         turn: int,
     ) -> Completion:
         prompt_messages = [*messages, {"role": "system", "content": _COMPLETION_INSTRUCTION}]
+        temperature = 0.72 if mode == ChatMode.STORY else 0.55
         text = await self._request(
             messages=prompt_messages,
-            temperature=0.72 if mode == ChatMode.STORY else 0.55,
+            temperature=temperature,
         )
+        completion = self._build_completion(text, mode)
+        if completion is not None:
+            return completion
+
+        # 首次解析失败时，追加一条“只输出 JSON”的纠正指令重试一次。
+        retry_messages = [
+            *prompt_messages,
+            {"role": "system", "content": _RETRY_INSTRUCTION},
+        ]
+        retry_text = await self._request(
+            messages=retry_messages,
+            temperature=temperature,
+        )
+        completion = self._build_completion(retry_text, mode)
+        if completion is not None:
+            return completion
+
+        # 两次都失败时，不展示原始 JSON，改用礼貌的兜底回复。
+        return Completion(
+            answer=_FALLBACK_ANSWER,
+            suggestions=list(_DEFAULT_SUGGESTIONS[mode]),
+        )
+
+    @staticmethod
+    def _build_completion(text: str, mode: ChatMode) -> Completion | None:
         data = _extract_json(text)
         if data and str(data.get("answer", "")).strip():
             return Completion(
                 answer=str(data["answer"]).strip(),
                 suggestions=_normalize_suggestions(data, mode),
             )
-        # 模型未按约定返回 JSON 时，把原文当回答，建议回退到默认值。
-        return Completion(
-            answer=text.strip(),
-            suggestions=list(_DEFAULT_SUGGESTIONS[mode]),
-        )
+        return None
 
     async def summarize(
         self,
